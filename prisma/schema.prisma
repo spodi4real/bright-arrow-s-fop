@@ -1,0 +1,598 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// ENUMS
+// ============================================================
+
+enum Role {
+  admin
+  supervisor
+  iskra
+  accountant
+  engineer
+}
+
+enum MissionType {
+  rf_site_survey
+  site_maintenance
+  installation_supervising
+  comm_check // v1.1 placeholder - not yet active
+}
+
+enum MissionStatus {
+  planned
+  active
+  paused
+  completed
+}
+
+enum District {
+  sulaymaniyah
+  duhok
+  erbil
+}
+
+enum ContractorName {
+  bim
+  broadcast
+  shandez
+}
+
+enum MeterType {
+  me516
+  me513
+  mt880
+  am550dc
+  am550ct
+  gateway
+}
+
+enum MaintenanceStatus {
+  resolved
+  ongoing
+  out_of_scope
+}
+
+enum SignalRating {
+  bad
+  good
+  perfect
+}
+
+enum InvitationStatus {
+  pending
+  accepted
+  declined
+}
+
+enum ExpenseStatus {
+  pending
+  approved
+  denied
+}
+
+enum Currency {
+  usd
+  iqd
+}
+
+enum NotificationType {
+  mission_invitation
+  expense_pending
+  expense_approved
+  expense_denied
+  mission_starting
+  target_assigned
+  violation_logged
+  generic
+}
+
+enum ViolationSeverity {
+  low
+  medium
+  high
+}
+
+enum InstallationEntryType {
+  meter
+  note
+}
+
+// ============================================================
+// USERS, SESSIONS, AUDIT
+// ============================================================
+
+model User {
+  id               String   @id @default(cuid())
+  username         String   @unique
+  passwordHash     String
+  displayName      String
+  email            String?
+  role             Role
+  active           Boolean  @default(true)
+  themePreference  String   @default("system") // light | dark | system
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  sessions             Session[]
+  createdMissions      Mission[]              @relation("MissionCreator")
+  missionMemberships   MissionMember[]
+  sentInvitations      MissionInvitation[]    @relation("InviteSender")
+  receivedInvitations  MissionInvitation[]    @relation("InviteRecipient")
+  missionLogs          MissionLog[]
+  gateways             Gateway[]              @relation("GatewayRegisteredBy")
+  maintenanceMeters    MaintenanceMeter[]     @relation("MaintenanceRegisteredBy")
+  installationMeters   InstallationMeter[]    @relation("InstallationMeterRegisteredBy")
+  installationNotes    InstallationNote[]     @relation("InstallationNoteCreatedBy")
+  surveys              PostMissionSurvey[]
+  violations           Violation[]            @relation("ViolationSubmittedBy")
+  targets              Target[]               @relation("TargetUser")
+  targetsCreated       Target[]               @relation("TargetCreatedBy")
+  bonusSnapshots       BonusScoreSnapshot[]
+  expenses             Expense[]              @relation("ExpenseSubmittedBy")
+  expensesReviewed     Expense[]              @relation("ExpenseReviewedBy")
+  pocketMoneyEntries   PocketMoneyTransaction[] @relation("PMOwner")
+  pocketMoneyIssued    PocketMoneyTransaction[] @relation("PMIssuer")
+  agendaEvents         AgendaEventAttendee[]
+  agendaEventsCreated  AgendaEvent[]          @relation("EventCreatedBy")
+  holidaysCreated      Holiday[]              @relation("HolidayCreatedBy")
+  uploadedFiles        FileRecord[]           @relation("FileUploadedBy")
+  notifications        Notification[]
+  auditEvents          AuditLog[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  userAgent String?
+  ip        String?
+  createdAt DateTime @default(now())
+  expiresAt DateTime
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  entity    String
+  entityId  String?
+  details   Json?
+  ip        String?
+  createdAt DateTime @default(now())
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entity, entityId])
+  @@index([userId])
+  @@index([createdAt])
+}
+
+// ============================================================
+// MISSIONS
+// ============================================================
+
+model Mission {
+  id                    String          @id @default(cuid())
+  name                  String
+  type                  MissionType
+  status                MissionStatus   @default(planned)
+  district              District
+  zoneName              String
+  contractorId          String?
+  // For RF survey
+  referenceFileId       String?  @unique
+  expectedGatewayCount  Int?
+  // For maintenance
+  meterTypes            MeterType[]
+  // Lifecycle timestamps
+  scheduledStartAt      DateTime
+  startedAt             DateTime?
+  endedAt               DateTime?
+  // Slug for filesystem layout
+  slug                  String
+  // Ownership
+  createdById           String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  createdBy     User                @relation("MissionCreator", fields: [createdById], references: [id])
+  contractor    Contractor?         @relation(fields: [contractorId], references: [id])
+  referenceFile FileRecord?         @relation("MissionReferenceFile", fields: [referenceFileId], references: [id])
+  members       MissionMember[]
+  invitations   MissionInvitation[]
+  logs          MissionLog[]
+  gateways      Gateway[]
+  maintMeters   MaintenanceMeter[]
+  installEntries InstallationMeter[]
+  installNotes  InstallationNote[]
+  survey        PostMissionSurvey?
+  files         FileRecord[]        @relation("MissionFiles")
+
+  @@index([status])
+  @@index([type])
+  @@index([createdById])
+  @@index([scheduledStartAt])
+}
+
+model MissionMember {
+  id        String   @id @default(cuid())
+  missionId String
+  userId    String
+  joinedAt  DateTime @default(now())
+  mission   Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([missionId, userId])
+  @@index([userId])
+}
+
+model MissionInvitation {
+  id          String           @id @default(cuid())
+  missionId   String
+  invitedById String
+  userId      String
+  status      InvitationStatus @default(pending)
+  createdAt   DateTime         @default(now())
+  respondedAt DateTime?
+  mission     Mission          @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  invitedBy   User             @relation("InviteSender", fields: [invitedById], references: [id])
+  user        User             @relation("InviteRecipient", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([missionId, userId])
+  @@index([userId, status])
+}
+
+model MissionLog {
+  id        String   @id @default(cuid())
+  missionId String
+  userId    String?
+  event     String   // created | started | day_ended | resumed | completed | member_added | item_registered
+  details   Json?
+  createdAt DateTime @default(now())
+  mission   Mission  @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([missionId, createdAt])
+}
+
+// ============================================================
+// MISSION ITEMS - SITE SURVEY
+// ============================================================
+
+model Gateway {
+  id                  String        @id @default(cuid())
+  missionId           String
+  gatewayId           String
+  latitude            Float?
+  longitude           Float?
+  coordinatesText     String?
+  korekRating         SignalRating?
+  zainRating          SignalRating?
+  asiacellRating      SignalRating?
+  registeredById      String
+  registeredAt        DateTime      @default(now())
+
+  mission       Mission      @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  registeredBy  User         @relation("GatewayRegisteredBy", fields: [registeredById], references: [id])
+  files         FileRecord[] @relation("GatewayFiles")
+
+  @@index([missionId])
+  @@unique([missionId, gatewayId])
+}
+
+// ============================================================
+// MISSION ITEMS - SITE MAINTENANCE
+// ============================================================
+
+model MaintenanceMeter {
+  id              String            @id @default(cuid())
+  missionId       String
+  serialNumber    String
+  location        String
+  enclosureNumber String?
+  description     String?
+  status          MaintenanceStatus
+  registeredById  String
+  registeredAt    DateTime          @default(now())
+
+  mission      Mission      @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  registeredBy User         @relation("MaintenanceRegisteredBy", fields: [registeredById], references: [id])
+  files        FileRecord[] @relation("MaintenanceMeterFiles")
+
+  @@index([missionId])
+}
+
+// ============================================================
+// MISSION ITEMS - INSTALLATION SUPERVISING
+// ============================================================
+
+model InstallationMeter {
+  id              String   @id @default(cuid())
+  missionId       String
+  serialNumber    String
+  observation     String?
+  registeredById  String
+  registeredAt    DateTime @default(now())
+
+  mission      Mission      @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  registeredBy User         @relation("InstallationMeterRegisteredBy", fields: [registeredById], references: [id])
+  files        FileRecord[] @relation("InstallMeterFiles")
+
+  @@index([missionId])
+}
+
+model InstallationNote {
+  id          String   @id @default(cuid())
+  missionId   String
+  noteText    String
+  createdById String
+  createdAt   DateTime @default(now())
+
+  mission   Mission      @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  createdBy User         @relation("InstallationNoteCreatedBy", fields: [createdById], references: [id])
+  files     FileRecord[] @relation("InstallNoteFiles")
+
+  @@index([missionId, createdAt])
+}
+
+// ============================================================
+// POST-MISSION SURVEY
+// ============================================================
+
+model PostMissionSurvey {
+  id                  String   @id @default(cuid())
+  missionId           String   @unique
+  submittedById       String
+  missionRating       Int?
+  generalNotes        String?
+  contractorRating    Int?
+  problemsEncountered String?
+  personalProblems    String? // private - admin only
+  recurringIssues     String?
+  suggestions         String?
+  createdAt           DateTime @default(now())
+
+  mission     Mission @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  submittedBy User    @relation(fields: [submittedById], references: [id])
+}
+
+// ============================================================
+// VIOLATIONS, CONTRACTORS
+// ============================================================
+
+model Contractor {
+  id            String         @id @default(cuid())
+  name          ContractorName @unique
+  displayName   String
+  baseScore     Float          @default(100)
+  createdAt     DateTime       @default(now())
+
+  missions   Mission[]
+  violations Violation[]
+}
+
+model Violation {
+  id            String            @id @default(cuid())
+  title         String
+  description   String
+  contractorId  String
+  district      District
+  place         String
+  severity      ViolationSeverity @default(medium)
+  submittedById String
+  createdAt     DateTime          @default(now())
+
+  contractor   Contractor   @relation(fields: [contractorId], references: [id])
+  submittedBy  User         @relation("ViolationSubmittedBy", fields: [submittedById], references: [id])
+  files        FileRecord[] @relation("ViolationFiles")
+
+  @@index([contractorId])
+  @@index([createdAt])
+}
+
+// ============================================================
+// TARGETS, KPIs, BONUS SCORES
+// ============================================================
+
+model Target {
+  id              String      @id @default(cuid())
+  userId          String
+  workstream      MissionType
+  metricLabel     String
+  amount          Int
+  startDate       DateTime
+  endDate         DateTime
+  visibleToUser   Boolean     @default(false)
+  createdById     String
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  user      User @relation("TargetUser", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy User @relation("TargetCreatedBy", fields: [createdById], references: [id])
+
+  @@index([userId])
+  @@index([startDate, endDate])
+}
+
+model BonusScoreSnapshot {
+  id              String   @id @default(cuid())
+  userId          String
+  periodStart     DateTime
+  periodEnd       DateTime
+  targetHitPct    Float
+  productivity    Float
+  quality         Float
+  reliability     Float
+  initiative      Float
+  collaboration   Float
+  violationReports Float
+  totalScore      Float
+  breakdown       Json
+  createdAt       DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, periodEnd])
+}
+
+// ============================================================
+// FINANCIAL: EXPENSES, POCKET MONEY
+// ============================================================
+
+model Expense {
+  id                    String        @id @default(cuid())
+  submittedById         String
+  name                  String
+  note                  String?
+  amount                Float
+  currency              Currency
+  lockedExchangeRate    Float
+  amountUsd             Float
+  status                ExpenseStatus @default(pending)
+  reviewedById          String?
+  reviewedAt            DateTime?
+  denialReason          String?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  submittedBy User         @relation("ExpenseSubmittedBy", fields: [submittedById], references: [id], onDelete: Cascade)
+  reviewedBy  User?        @relation("ExpenseReviewedBy", fields: [reviewedById], references: [id])
+  files       FileRecord[] @relation("ExpenseFiles")
+
+  @@index([submittedById, status])
+  @@index([status, createdAt])
+}
+
+model PocketMoneyTransaction {
+  id            String   @id @default(cuid())
+  userId        String
+  issuedById    String
+  amountUsd     Float
+  reason        String
+  createdAt     DateTime @default(now())
+
+  user     User @relation("PMOwner", fields: [userId], references: [id], onDelete: Cascade)
+  issuedBy User @relation("PMIssuer", fields: [issuedById], references: [id])
+
+  @@index([userId, createdAt])
+}
+
+// ============================================================
+// AGENDA
+// ============================================================
+
+model AgendaEvent {
+  id           String   @id @default(cuid())
+  title        String
+  location     String?
+  note         String?
+  startAt      DateTime
+  endAt        DateTime
+  createdById  String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  createdBy User                  @relation("EventCreatedBy", fields: [createdById], references: [id])
+  attendees AgendaEventAttendee[]
+
+  @@index([startAt, endAt])
+}
+
+model AgendaEventAttendee {
+  id      String @id @default(cuid())
+  eventId String
+  userId  String
+
+  event AgendaEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user  User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, userId])
+}
+
+model Holiday {
+  id          String   @id @default(cuid())
+  name        String
+  startDate   DateTime
+  endDate     DateTime
+  createdById String
+  createdAt   DateTime @default(now())
+
+  createdBy User @relation("HolidayCreatedBy", fields: [createdById], references: [id])
+
+  @@index([startDate, endDate])
+}
+
+// ============================================================
+// FILES
+// ============================================================
+
+model FileRecord {
+  id            String   @id @default(cuid())
+  path          String   // absolute path under FILE_STORAGE_ROOT
+  relativePath  String   // relative to FILE_STORAGE_ROOT
+  originalName  String
+  mimeType      String
+  sizeBytes     Int
+  category      String   // site_surveys | site_maintenance | installations | violations | expenses | general
+  uploadedById  String
+  // Optional links
+  missionId            String?
+  gatewayId            String?
+  maintenanceMeterId   String?
+  installationMeterId  String?
+  installationNoteId   String?
+  expenseId            String?
+  violationId          String?
+  createdAt            DateTime @default(now())
+
+  uploadedBy        User              @relation("FileUploadedBy", fields: [uploadedById], references: [id])
+  mission           Mission?          @relation("MissionFiles", fields: [missionId], references: [id], onDelete: Cascade)
+  missionReferenceFor Mission?        @relation("MissionReferenceFile")
+  gateway           Gateway?          @relation("GatewayFiles", fields: [gatewayId], references: [id], onDelete: Cascade)
+  maintenanceMeter  MaintenanceMeter? @relation("MaintenanceMeterFiles", fields: [maintenanceMeterId], references: [id], onDelete: Cascade)
+  installationMeter InstallationMeter? @relation("InstallMeterFiles", fields: [installationMeterId], references: [id], onDelete: Cascade)
+  installationNote  InstallationNote? @relation("InstallNoteFiles", fields: [installationNoteId], references: [id], onDelete: Cascade)
+  expense           Expense?          @relation("ExpenseFiles", fields: [expenseId], references: [id], onDelete: Cascade)
+  violation         Violation?        @relation("ViolationFiles", fields: [violationId], references: [id], onDelete: Cascade)
+
+  @@index([category])
+  @@index([uploadedById])
+  @@index([missionId])
+}
+
+// ============================================================
+// NOTIFICATIONS, SETTINGS
+// ============================================================
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  message   String
+  link      String?
+  read      Boolean          @default(false)
+  createdAt DateTime         @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read, createdAt])
+}
+
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
